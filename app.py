@@ -10,6 +10,12 @@
 
 Совместим с Python 3.12–3.14 (есть фикс event loop).
 Зависимости: python-telegram-bot==21.6
+
+Для Railway:
+- загрузи этот проект в GitHub;
+- в Railway создай Worker из репозитория;
+- добавь переменную окружения TELEGRAM_BOT_TOKEN;
+- команда запуска: python app.py
 """
 
 import os
@@ -48,18 +54,21 @@ logger = logging.getLogger("postbot")
 
 # ---------- КОНФИГ ----------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TARGET_CHAT = "@mnogomorya"              # канал назначения
-ADMIN_USER_ID = 211779388                # единственный админ
-LOCAL_TZ = ZoneInfo("Europe/Stockholm")  # таймзона для таймера
+TARGET_CHAT = "@mnogomorya"          # канал назначения
+ADMIN_USER_ID = 211779388            # твой user_id (только ты управляешь)
+LOCAL_TZ = ZoneInfo("Europe/Amsterdam")  # таймзона для таймера
 
 if not BOT_TOKEN:
-    raise SystemExit("\n[CONFIG] TELEGRAM_BOT_TOKEN не задан. Установи переменную и перезапусти.\n")
+    raise SystemExit(
+        "\n[CONFIG] TELEGRAM_BOT_TOKEN не задан.\n"
+        "Добавь переменную окружения TELEGRAM_BOT_TOKEN в Railway и перезапусти.\n"
+    )
 
 # ---------- МОДЕЛИ ----------
 @dataclass
 class Draft:
     text: str = ""
-    # Список медиа: ("photo"|"video"|"document"|"animation"|"audio"|"voice", file_id)
+    # список медиа: ("photo"|"video"|"document"|"animation"|"audio"|"voice", file_id)
     media: List[Tuple[str, str]] = field(default_factory=list)
 
     def is_empty(self) -> bool:
@@ -68,12 +77,14 @@ class Draft:
     def copy(self) -> "Draft":
         return Draft(text=self.text, media=list(self.media))
 
+
 @dataclass
 class ScheduledJob:
     when: datetime
     task: asyncio.Task
 
-# Память на время жизни процесса
+
+# хранилища в памяти процесса
 DRAFTS: Dict[int, Draft] = {}
 SCHEDULES: Dict[int, ScheduledJob] = {}
 
@@ -81,10 +92,12 @@ SCHEDULES: Dict[int, ScheduledJob] = {}
 def authorized(user_id: int) -> bool:
     return int(user_id) == int(ADMIN_USER_ID)
 
+
 def get_draft(user_id: int) -> Draft:
     if user_id not in DRAFTS:
         DRAFTS[user_id] = Draft()
     return DRAFTS[user_id]
+
 
 def summarize_draft(d: Draft) -> str:
     parts = []
@@ -97,6 +110,7 @@ def summarize_draft(d: Draft) -> str:
         return "Черновик пуст. Пришли текст или фото/видео (можно несколько подряд для альбома)."
     return "\n\n".join(parts)
 
+
 def keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -108,6 +122,7 @@ def keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("⏰ Подсказка по таймеру: /timer", callback_data="noop")],
         ]
     )
+
 
 def set_text_from(update: Update, draft: Draft) -> None:
     msg = update.effective_message
@@ -122,12 +137,15 @@ def set_text_from(update: Update, draft: Draft) -> None:
         cmd = next((e for e in entities if e.type == MessageEntity.BOT_COMMAND), None)
         draft.text = (msg.caption[cmd.offset + cmd.length :] if cmd else msg.caption).strip()
 
+
 def add_media_to_draft(draft: Draft, kind: str, file_id: str) -> None:
-    """Фото/видео копятся для альбома (до 10). Остальные типы ведём как одиночки (берём последние)."""
+    """
+    Фото/видео копятся для альбома (до 10).
+    Остальные типы ведём как одиночки (берём последние, но не трогаем альбом фото/видео).
+    """
     if kind in ("photo", "video"):
         draft.media.append((kind, file_id))
-        # лимит Telegram — 10 элементов
-        draft.media = draft.media[-10:]
+        draft.media = draft.media[-10:]  # лимит Телеграма
     else:
         draft.media.append((kind, file_id))
         seen = set()
@@ -140,8 +158,12 @@ def add_media_to_draft(draft: Draft, kind: str, file_id: str) -> None:
                 new_media.append((k, fid))
         draft.media = list(reversed(new_media))
 
+
 def draft_to_media_group(d: Draft) -> Optional[List]:
-    """Если фото/видео >= 2 — собрать InputMedia* для send_media_group. Подпись ставим в первый элемент."""
+    """
+    Если в черновике фото/видео >= 2 — вернуть список InputMedia для send_media_group.
+    Подпись ставим только в первый элемент.
+    """
     pv = [(k, fid) for (k, fid) in d.media if k in ("photo", "video")]
     if len(pv) < 2:
         return None
@@ -149,10 +171,23 @@ def draft_to_media_group(d: Draft) -> Optional[List]:
     for idx, (k, fid) in enumerate(pv):
         caption = d.text if idx == 0 else None
         if k == "photo":
-            items.append(InputMediaPhoto(media=fid, caption=caption, parse_mode=ParseMode.HTML if caption else None))
+            items.append(
+                InputMediaPhoto(
+                    media=fid,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML if caption else None,
+                )
+            )
         else:
-            items.append(InputMediaVideo(media=fid, caption=caption, parse_mode=ParseMode.HTML if caption else None))
+            items.append(
+                InputMediaVideo(
+                    media=fid,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML if caption else None,
+                )
+            )
     return items
+
 
 async def send_preview(uid: int, d: Draft, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     group = draft_to_media_group(d)
@@ -178,6 +213,7 @@ async def send_preview(uid: int, d: Draft, ctx: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await ctx.bot.send_message(uid, d.text or "Черновик пуст.", parse_mode=ParseMode.HTML)
 
+
 async def publish_to_channel(d: Draft, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     group = draft_to_media_group(d)
     if group:
@@ -202,12 +238,15 @@ async def publish_to_channel(d: Draft, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await ctx.bot.send_message(TARGET_CHAT, d.text or "", parse_mode=ParseMode.HTML)
 
+
 # ---------- ПАРСИНГ ВРЕМЕНИ ----------
 TIME_HHMM = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 TIME_ABS = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*$")
 TIME_REL = re.compile(r"^\s*in\s+(\d+)\s*(m|min|h|hr|d)\s*$", re.IGNORECASE)
 
+
 def parse_when(s: str, now: datetime) -> Optional[datetime]:
+    # HH:MM
     m = TIME_HHMM.match(s)
     if m:
         hh, mm = int(m.group(1)), int(m.group(2))
@@ -216,6 +255,7 @@ def parse_when(s: str, now: datetime) -> Optional[datetime]:
             dt = dt + timedelta(days=1)
         return dt
 
+    # YYYY-MM-DD HH:MM
     m = TIME_ABS.match(s)
     if m:
         y, mo, d, hh, mm = map(int, m.groups())
@@ -224,6 +264,7 @@ def parse_when(s: str, now: datetime) -> Optional[datetime]:
         except ValueError:
             return None
 
+    # in 10m / 2h / 1d
     m = TIME_REL.match(s)
     if m:
         amount = int(m.group(1))
@@ -237,6 +278,7 @@ def parse_when(s: str, now: datetime) -> Optional[datetime]:
 
     return None
 
+
 # ---------- ХЕНДЛЕРЫ ----------
 async def ensure_auth(update: Update) -> Optional[int]:
     u = update.effective_user
@@ -246,6 +288,7 @@ async def ensure_auth(update: Update) -> Optional[int]:
         return u.id
     await update.effective_message.reply_text("⛔️ У тебя нет прав управлять этим ботом.")
     return None
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
@@ -266,18 +309,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.HTML,
     )
 
+
 async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
     if uid is None:
         return
     await update.effective_message.reply_html(f"Твой user_id: <code>{uid}</code>")
 
+
 async def cmd_timer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
     if uid is None:
         return
     if not context.args:
-        await update.effective_message.reply_text("Форматы: /timer HH:MM | YYYY-MM-DD HH:MM | in 10m|2h|1d")
+        await update.effective_message.reply_text(
+            "Форматы: /timer HH:MM | YYYY-MM-DD HH:MM | in 10m|2h|1d"
+        )
         return
 
     when_str = " ".join(context.args)
@@ -304,7 +351,10 @@ async def cmd_timer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if delay > 0:
                 await asyncio.sleep(delay)
             await publish_to_channel(draft, context)
-            await context.bot.send_message(uid, f"✅ Опубликовано по таймеру: {when.strftime('%Y-%m-%d %H:%M')}")
+            await context.bot.send_message(
+                uid,
+                f"✅ Опубликовано по таймеру: {when.strftime('%Y-%m-%d %H:%M')}",
+            )
             SCHEDULES.pop(uid, None)
         except asyncio.CancelledError:
             pass
@@ -314,7 +364,10 @@ async def cmd_timer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     t = asyncio.create_task(job())
     SCHEDULES[uid] = ScheduledJob(when=when, task=t)
-    await update.effective_message.reply_text(f"⏰ Запланировал на {when.strftime('%Y-%m-%d %H:%M %Z')}")
+    await update.effective_message.reply_text(
+        f"⏰ Запланировал на {when.strftime('%Y-%m-%d %H:%M %Z')}"
+    )
+
 
 async def cmd_cancel_timer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
@@ -327,6 +380,7 @@ async def cmd_cancel_timer(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     else:
         await update.effective_message.reply_text("Нет активного таймера.")
 
+
 async def cmd_when(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
     if uid is None:
@@ -335,7 +389,10 @@ async def cmd_when(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not sched:
         await update.effective_message.reply_text("Нет запланированной публикации.")
     else:
-        await update.effective_message.reply_text(f"⏰ Запланировано на {sched.when.strftime('%Y-%m-%d %H:%M %Z')}")
+        await update.effective_message.reply_text(
+            f"⏰ Запланировано на {sched.when.strftime('%Y-%m-%d %H:%M %Z')}"
+        )
+
 
 # ---- текст и медиа ----
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -345,6 +402,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     d = get_draft(uid)
     set_text_from(update, d)
     await update.effective_message.reply_html(summarize_draft(d), reply_markup=keyboard())
+
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
@@ -356,6 +414,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     set_text_from(update, d)
     await update.effective_message.reply_html(summarize_draft(d), reply_markup=keyboard())
 
+
 async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
     if uid is None:
@@ -364,6 +423,7 @@ async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_media_to_draft(d, "video", update.effective_message.video.file_id)
     set_text_from(update, d)
     await update.effective_message.reply_html(summarize_draft(d), reply_markup=keyboard())
+
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
@@ -374,6 +434,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     set_text_from(update, d)
     await update.effective_message.reply_html(summarize_draft(d), reply_markup=keyboard())
 
+
 async def on_animation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
     if uid is None:
@@ -382,6 +443,7 @@ async def on_animation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     add_media_to_draft(d, "animation", update.effective_message.animation.file_id)
     set_text_from(update, d)
     await update.effective_message.reply_html(summarize_draft(d), reply_markup=keyboard())
+
 
 async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
@@ -392,6 +454,7 @@ async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     set_text_from(update, d)
     await update.effective_message.reply_html(summarize_draft(d), reply_markup=keyboard())
 
+
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = await ensure_auth(update)
     if uid is None:
@@ -400,6 +463,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_media_to_draft(d, "voice", update.effective_message.voice.file_id)
     set_text_from(update, d)
     await update.effective_message.reply_html(summarize_draft(d), reply_markup=keyboard())
+
 
 # ---- кнопки ----
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -446,12 +510,14 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             sched.task.cancel()
         return
 
+
 # ---------- СТАРТ ----------
 async def on_startup(app):
     me = await app.bot.get_me()
     logger.info("Bot started as @%s", me.username)
     logger.info("Target channel: %s", TARGET_CHAT)
     logger.info("Admin user_id: %s", ADMIN_USER_ID)
+
 
 def main() -> None:
     # Фикс для Python 3.14: создать event loop в главном потоке при необходимости
@@ -482,6 +548,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_cb))
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
